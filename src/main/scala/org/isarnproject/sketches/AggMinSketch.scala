@@ -60,13 +60,37 @@ trait AggMinSketch[K, D, A] {
 }
 
 object AggMinSketch {
-/*
-  def countMinSketch[K](d: Int, w: Int) = new AggMinSketch[K, Int, Int] {
-    val d = d
-    val w = w
-    def hash(j: Int) = (k: K) => scala.util.hashing.MurmurHash3.productHash(new Tuple1(k), j)
-    val mq = new MinimumMonoid[Int]
-    val agg = new Aggregator(new AdditionMonoid[Int])
+  case class NumericMax[N](max: N)
+
+  implicit val intNumericMax = NumericMax[Int](Int.MaxValue)
+
+  def minMonoid[N](implicit num: scala.math.Numeric[N], max: NumericMax[N]) = new Monoid[N] {
+    def empty: N = max.max
+    def combineAll(as: TraversableOnce[N]): N = as.foldLeft(empty) { case (t, e) => num.min(t, e) }
+    def combine(x: N, y: N) = num.min(x, y)
+    def combineAllOption(as: TraversableOnce[N]) = if (as.isEmpty) None else Some(combineAll(as))
   }
-*/
+
+  def addMonoid[N](implicit num: scala.math.Numeric[N]) = new Monoid[N] {
+    def empty: N = num.zero
+    def combineAll(as: TraversableOnce[N]): N = as.foldLeft(empty) { case (t, e) => num.plus(t, e) }
+    def combine(x: N, y: N) = num.plus(x, y)
+    def combineAllOption(as: TraversableOnce[N]) = if (as.isEmpty) None else Some(combineAll(as))
+  }
+
+  def addAggregator[N](implicit num: scala.math.Numeric[N]) = new Aggregator[N, N] {
+    val monoid = addMonoid[N]
+    def lff = (m: N, d: N) => num.plus(m, d)
+    def mf = (d: N) => d
+    def aggregate(as: TraversableOnce[N]) = as.foldLeft(num.zero) { case (t, e) => num.plus(t, e) }
+  }
+
+  def countMinSketch[K](dp: Int, wp: Int) = new AggMinSketch[K, Int, Int] {
+    val d = dp
+    val w = wp
+    val mq = minMonoid[Int]
+    val agg = addAggregator[Int]
+    val data = Array.fill(d) { Array.fill(w)(0) }
+    def hash(j: Int) = (k: K) => scala.util.hashing.MurmurHash3.productHash(new Tuple1(k), (j + 11) * (j + 13))
+  }
 }
