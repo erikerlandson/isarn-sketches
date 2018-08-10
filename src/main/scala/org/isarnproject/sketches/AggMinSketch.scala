@@ -32,11 +32,12 @@ trait AggMinSketch[K, D, A] {
   // query monoid - in count-min sketch, this is "minimum"
   def mq: Monoid[A]
 
+  private final def hash(r: Int, k: K): Int = math.abs(hash(r)(k)) % w
+
   // Agg Min Sketch is an updating monoid, aka aggregator
-  def update(kv: (K, D)): Unit = {
-    val (k, v) = kv
+  def update(k: K, v: D): Unit = {
     (0 until d).foreach { r =>
-        val c = hash(r)(k) % w
+        val c = hash(r, k)
         data(r)(c) = agg.lff(data(r)(c), v)
     }
   }
@@ -55,7 +56,7 @@ trait AggMinSketch[K, D, A] {
   // generalized count-min query
   def query(k: K): A =
     (0 until d).iterator
-      .map { r => data(r)(hash(r)(k) % w) }
+      .map { r => data(r)(hash(r, k)) }
       .foldLeft(mq.empty) { case (fa, a) => mq.combine(fa, a) }
 }
 
