@@ -86,12 +86,79 @@ object AggMinSketch {
     def aggregate(as: TraversableOnce[N]) = as.foldLeft(num.zero) { case (t, e) => num.plus(t, e) }
   }
 
-  def countMinSketch[K](dp: Int, wp: Int) = new AggMinSketch[K, Int, Int] {
+  type CountMinSketch[K] = AggMinSketch[K, Int, Int]
+
+  def countMinSketch[K](dp: Int, wp: Int) = new CountMinSketch[K] {
     val d = dp
     val w = wp
     val mq = minMonoid[Int]
     val agg = addAggregator[Int]
     val data = Array.fill(d) { Array.fill(w)(0) }
     def hash(j: Int) = (k: K) => scala.util.hashing.MurmurHash3.productHash(new Tuple1(k), (j + 11) * (j + 13))
+  }
+
+  def countMinMonoid[K](dp: Int, wp: Int) = new Monoid[CountMinSketch[K]] {
+    def empty: CountMinSketch[K] = countMinSketch[K](dp, wp)
+    def combine(x: CountMinSketch[K], y: CountMinSketch[K]): CountMinSketch[K] = {
+      val r = empty
+      r.merge(x)
+      r.merge(y)
+      r
+    }
+    def combineAll(as: TraversableOnce[CountMinSketch[K]]) = as.foldLeft(empty) { case (t, e) => combine(t, e) }
+    def combineAllOption(as: TraversableOnce[CountMinSketch[K]]) = if (as.isEmpty) None else Some(combineAll(as))
+  }
+
+  def countMinAggregator[K](dp: Int, wp: Int) = new Aggregator[CountMinSketch[K], K] {
+    val monoid = countMinMonoid[K](dp, wp)
+    def lff = (m: CountMinSketch[K], d: K) => { m.update(d, 1); m }
+    def mf = (d: K) => { val m = monoid.empty; m.update(d, 1); m }
+    def aggregate(as: TraversableOnce[K]) = as.foldLeft(monoid.empty) { case (t, e) => lff(t, e) }
+  }
+
+  def countMinQueryMonoid[K](dp: Int, wp: Int) = new Monoid[CountMinSketch[K]] {
+    def empty: CountMinSketch[K] = {
+      val e = countMinSketch[K](dp, wp)
+      for { r <- 0 until dp; c <- 0 until wp } {
+        e.data(r)(c) = Int.MaxValue
+      }
+      e
+    }
+    def combine(x: CountMinSketch[K], y: CountMinSketch[K]):CountMinSketch[K]  = {
+      val xnorm = norm(x)
+      val ynorm = norm(y)
+      if (xnorm < ynorm) x else y
+    }
+    def combineAll(as: TraversableOnce[CountMinSketch[K]]) = as.foldLeft(empty) { case (t, e) => combine(t, e) }
+    def combineAllOption(as: TraversableOnce[CountMinSketch[K]]) = if (as.isEmpty) None else Some(combineAll(as))
+    private def norm(x: CountMinSketch[K]): Long = {
+      x.data.iterator.map { row => row.iterator.map { _.toLong }.sum }.sum
+      /*
+      var n: Long = 0L
+      for { r <- 0 until dp; c <- 0 until wp } {
+        n += (x.data(r)(c)).toLong
+      }
+      n
+      */
+    }
+  }
+
+  def metaSketch[QK, DK](dp: Int, wp: Int) = new AggMinSketch[QK, DK, CountMinSketch[DK]] {
+    val d = dp
+    val w = wp
+    val mq = countMinQueryMonoid[DK](dp, wp)
+    val agg = countMinAggregator[DK](dp, wp)
+    val data = Array.fill(d) { Array.fill(w) { agg.monoid.empty } }
+    def hash(j: Int) = (k: QK) => scala.util.hashing.MurmurHash3.productHash(new Tuple1(k), (j + 11) * (j + 13))
+  }
+
+  def innerProduct[K](s1: CountMinSketch[K], s2: CountMinSketch[K]): Long = {
+    require(s1.d == s2.d)
+    require(s1.w == s2.w)
+    def ip(r: Int): Long = {
+      val (d1, d2) = (s1.data(r), s2.data(r))
+      (0 until s1.w).iterator.map { c => d1(c).toLong * d2(c).toLong }.sum
+    }
+    (0 until s1.d).iterator.map { ip(_) }.min
   }
 }
