@@ -116,6 +116,11 @@ object AggMinSketch {
     def aggregate(as: TraversableOnce[K]) = as.foldLeft(monoid.empty) { case (t, e) => lff(t, e) }
   }
 
+  // There are a bunch of possible heuristic definitions for what min(cms1, cms2) means.
+  // 1. pick the one whose sum of matrix elements is smallest (L1 norm over elements)
+  // 2. for each row, pick the row from either cms1 or cms2 whose element sum is smallest (L1 of row)
+  // 3. if you are willing to generalize what information is available to a query, you could
+  // pick the cms whose min-query for a given key is smallest.
   def countMinQueryMonoid[K](dp: Int, wp: Int) = new Monoid[CountMinSketch[K]] {
     def empty: CountMinSketch[K] = {
       val e = countMinSketch[K](dp, wp)
