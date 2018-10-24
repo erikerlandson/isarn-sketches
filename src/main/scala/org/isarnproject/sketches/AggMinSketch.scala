@@ -129,23 +129,12 @@ object AggMinSketch {
       }
       e
     }
-    def combine(x: CountMinSketch[K], y: CountMinSketch[K]):CountMinSketch[K]  = {
-      val xnorm = norm(x)
-      val ynorm = norm(y)
-      if (xnorm < ynorm) x else y
-    }
+    def combine(x: CountMinSketch[K], y: CountMinSketch[K]):CountMinSketch[K] =
+      if (norm(x) < norm(y)) x else y
     def combineAll(as: TraversableOnce[CountMinSketch[K]]) = as.foldLeft(empty) { case (t, e) => combine(t, e) }
     def combineAllOption(as: TraversableOnce[CountMinSketch[K]]) = if (as.isEmpty) None else Some(combineAll(as))
-    private def norm(x: CountMinSketch[K]): Long = {
+    private def norm(x: CountMinSketch[K]): Long =
       x.data.iterator.map { row => row.iterator.map { _.toLong }.sum }.sum
-      /*
-      var n: Long = 0L
-      for { r <- 0 until dp; c <- 0 until wp } {
-        n += (x.data(r)(c)).toLong
-      }
-      n
-      */
-    }
   }
 
   def metaSketch[QK, DK](dp: Int, wp: Int) = new AggMinSketch[QK, DK, CountMinSketch[DK]] {
