@@ -1,5 +1,5 @@
 /*
-Copyright 2016-2018 Erik Erlandson
+Copyright 2016-2020 Erik Erlandson
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -43,10 +43,13 @@ import java.util.Random;
  * </pre>
  */
 public class TDigest implements Serializable {
-    /** compression setting (delta in original paper) */
-    protected final double C;
+    /** maximum number of clusters to use for this sketch */
+    protected final int maxClusters;
     /** maximum number of unique discrete values to track */
     protected final int maxDiscrete;
+
+    /** compression (delta in original paper) */
+    protected double C;
     /** current number of clusters */
     protected int nclusters = 0;
     /** total mass of data sampled so far */
@@ -58,45 +61,50 @@ public class TDigest implements Serializable {
     /** cumulative cluster masses, represented as a Fenwick Tree */
     protected double[] ftre = null;
 
-    /** A new t-digest sketching structure with default compression and maximum discrete tracking. */
+    /** A new t-digest sketching structure with default max-size and maximum discrete tracking. */
     public TDigest() {
-        this(COMPRESSION_DEFAULT, 0, INIT_SIZE_DEFAULT);
+        this(MAX_SIZE_DEFAULT, 0, INIT_SIZE_DEFAULT);
     }
 
-    /** Construct a t-digest with the given compression.
+    /** Construct a t-digest with the given max-size.
      * Maximum discrete tracking defaults to zero.
-     * @param compression sketching compression setting. Higher = more compression.
+     * @param maxSize sketching maxsize setting.
      * Must be &gt; 0.
      */
-    public TDigest(double compression) {
-        this(compression, 0, INIT_SIZE_DEFAULT);
+    public TDigest(int maxSize) {
+        this(maxSize, 0, INIT_SIZE_DEFAULT);
     }
 
-    /** Construct a t-digest with the given compression and maximum discrete tracking.
-     * @param compression sketching compression setting. Higher = more compression.
+    /** Construct a t-digest with the given maxsize and maximum discrete tracking.
+     * @param maxSize sketching maxsize setting.
      * Must be &gt; 0.
      * @param maxDiscrete maximum number of unique discrete values to track. Must be &ge; 0.
      * If this number of values is exceeded, the sketch will begin to operate in 
      * normal continuous mode.
      */
-    public TDigest(double compression, int maxDiscrete) {
-        this(compression, maxDiscrete, INIT_SIZE_DEFAULT);
+    public TDigest(int maxSize, int maxDiscrete) {
+        this(maxSize, maxDiscrete, INIT_SIZE_DEFAULT);
     }
 
-    /** Construct a t-digest with the given compression and maximum discrete tracking.
-     * @param compression sketching compression setting. Higher = more compression.
+    /** Construct a t-digest with the given maxsize and maximum discrete tracking.
+     * @param maxSize sketching maxsize setting.
      * Must be &gt; 0.
-     * @param maxDiscrete maximum number of unique discrete values to track. Must be &ge; 0.
+     * @param maxDisc maximum number of unique discrete values to track. Must be &ge; 0.
      * If this number of values is exceeded, the sketch will begin to operate in 
      * normal continuous mode.
      * @param sz initial capacity to use for internal arrays. Must be &gt; 0.
      */
-    public TDigest(double compression, int maxDiscrete, int sz) {
-        assert compression > 0.0;
-        assert maxDiscrete >= 0;
+    public TDigest(int maxSize, int maxDisc, int sz) {
+        assert maxSize > 0;
+        assert maxDisc >= 0;
+        assert maxDisc <= maxSize;
         assert sz > 0;
-        C = compression;
-        this.maxDiscrete = maxDiscrete;
+        this.maxClusters = maxSize;
+        this.maxDiscrete = maxDisc;
+        // compression such that middle half of (c)(q)(1-q) curve >= 2
+        // that is: we can form "2-clusters" from the start, between quantile 0.25 - 0.75
+        C = 12.0 / (double)maxSize;
+        sz = Math.min(sz, maxSize);
         cent = new double[sz];
         mass = new double[sz];
         ftre = new double[1 + sz];
@@ -106,35 +114,40 @@ public class TDigest implements Serializable {
 
     /**
      * Construct a t-digest from a list of cluster centers and masses.
-     * Object deserialization is one of the intended use cases for this constructor.
-     * NOTE: This constructor assumes the 'cent' and 'mass' arrays will be owned
-     * by the new t-digest object. If 'cent' and 'mass' are both null then an empty cluster
+     * Object ser/de is one of the intended use cases for this constructor.
+     * NOTE: This constructor assumes the 'cnt' and 'mss' arrays will be owned
+     * by the new t-digest object. If 'cnt' and 'mss' are both null then an empty cluster
      * will be created.
-     * @param compression sketching compression setting. Higher = more compression.
+     * @param maxClust sketching maxsize setting.
      * Must be &gt; 0.
-     * @param maxDiscrete maximum number of unique discrete values to track. Must be &ge; 0.
-     * If this number of values is exceeded, the sketch will begin to operate in 
-     * @param cent the list of cluster centers. Assumed to be in sorted order.
+     * @param maxDisc maximum number of unique discrete values to track. Must be &ge; 0.
+     * If this number of values is exceeded, the sketch will begin to operate in continuous mode.
+     * @param comp the initial compression setting
+     * @param cnt the list of cluster centers. Assumed to be in sorted order.
      * This array is assumed to be owned by the t-digest object after construction.
-     * @param mass a list of cluster masses. Assumed to be parallel to centers.
+     * @param mss a list of cluster masses. Assumed to be parallel to centers.
      * This array is assumed to be owned by the t-digest object after construction.
      */
-    public TDigest(double compression, int maxDiscrete, double cent[], double mass[]) {
-        assert compression > 0.0;
-        assert maxDiscrete >= 0;
-        this.C = compression;
-        this.maxDiscrete = maxDiscrete;
-        assert (cent != null && mass != null) || (cent == null && mass == null);
-        this.nclusters = (cent != null) ? cent.length : 0;
+    public TDigest(int maxClust, int maxDisc, double comp, double cnt[], double mss[]) {
+        assert maxClust > 0;
+        assert maxDisc >= 0;
+        assert maxDisc <= maxClust;
+        assert comp > 0.0;
+        this.maxClusters = maxClust;
+        this.maxDiscrete = maxDisc;
+        this.C = comp;
+        assert (cnt != null && mss != null) || (cnt == null && mss == null);
+        nclusters = (cnt != null) ? cnt.length : 0;
+        assert nclusters <= maxClust;
         int sz = nclusters;
         if (sz == 0) {
             // cent, mass and ftre cannot be zero length
-            sz = INIT_SIZE_DEFAULT;
+            sz = Math.min(maxClust, INIT_SIZE_DEFAULT);
             this.cent = new double[sz];
             this.mass = new double[sz];
         } else {
-            this.cent = cent;
-            this.mass = mass;
+            this.cent = cnt;
+            this.mass = mss;
         }
         assert cent != null && mass != null;
         assert cent.length == sz;
@@ -151,19 +164,20 @@ public class TDigest implements Serializable {
 
     /** Construct a deep copy of another t-digest */
     public TDigest(TDigest that) {
-        C = that.C;
         maxDiscrete = that.maxDiscrete;
+        maxClusters = that.maxClusters;
+        C = that.C;
         nclusters = that.nclusters;
         M = that.M;
         cent = Arrays.copyOf(that.cent, nclusters);
         mass = Arrays.copyOf(that.mass, nclusters);
-        ftre = Arrays.copyOf(that.ftre, nclusters);
+        ftre = Arrays.copyOf(that.ftre, 1+nclusters);
     }
 
     /** Update the sketch with a new sampled value
      * @param x the new sampled value
      */
-    public final void update(double x) {
+    public final void update(final double x) {
         update(x, 1.0);
     }
 
@@ -171,12 +185,7 @@ public class TDigest implements Serializable {
      * @param x the new sampled value
      * @param w the weight (aka mass) associated with x
      */
-    public final void update(double x, double w) {
-        updateLogic(x, w);
-        if ((nclusters > maxDiscrete) && (nclusters > R())) recluster();
-    }
-
-    private final void updateLogic(double x, double w) {
+    public final void update(final double x, final double w) {
         if (nclusters == 0) {
             // clusters are empty, so (x,w) becomes the first cluster
             cent[0] = x;
@@ -219,6 +228,15 @@ public class TDigest implements Serializable {
         double dm = Math.min(w, Math.max(0.0, ub - m));
         // rm is the remainder of the mass
         double rm = w - dm;
+        if ((rm > 0.0) && (nclusters >= maxClusters)) {
+            // if there is remainder, then we will be adding a cluster.
+            // if we are also already at maximum clusters, then we need to recluster
+            // to make room and then re-insert
+            recluster();
+            update(x, w);
+            return;
+        }
+        // otherwise we insert the new mass normally
         if (dm > 0.0) {
             // Add any allowable mass to closest cluster and update its center.
             // It is safe to update center this way because it will remain
@@ -239,35 +257,58 @@ public class TDigest implements Serializable {
      * @param that the t-digest to merge. This t-digest is unaltered.
      */
     public final void merge(TDigest that) {
-        Integer[] indexes = new Integer[that.nclusters];
-        for (int j = 0; j < that.nclusters; ++j) indexes[j] = j;
-        // sort so that largest clusters are first.
-        // inserting large to small yields stable distribution estimations
-        Comparator<Integer> cmp = new Comparator<Integer>() {
-            @Override
-            public int compare(Integer a, Integer b) {
-                return (int)Math.signum(that.mass[b] - that.mass[a]);
-            }
-        };
-        Arrays.sort(indexes, cmp);
-        for (int j: indexes) update(that.cent[j], that.mass[j]);
+        Integer[] indexes = weightedOrdering(that.nclusters, that.cent, that.mass);
+        int split = (int)(0.75 * (double)(that.nclusters));
+        for (int j = 0; j <= split; ++j) {
+            // start by inserting larger or more central clusters first: "middle out"
+            update(that.cent[indexes[j]], that.mass[indexes[j]]);
+        }
+        for (int j = that.nclusters-1; j > split; --j) {
+            // finish by inserting clusters out on the tails outward-in:
+            // preserves the tail resolution and avoids the pathological
+            // scenario where points keep getting added to the end
+            update(that.cent[indexes[j]], that.mass[indexes[j]]);
+        }
     }
 
-    /** Re-cluster this t-digest by reinserting its clusters in randomized order. */
+    /** Re-cluster this t-digest by reinserting its clusters. */
     public final void recluster() {
-        // I suspect it may be possible to improve on this fully-randomized algorithm,
-        // by leveraging the largest-first heuristic I use in cluster merging. See:
-        // http://erikerlandson.github.io/blog/2016/12/19/converging-monoid-addition-for-t-digest/
-        int[] indexes = new int[nclusters];
-        for (int j = 0; j < nclusters; ++j) indexes[j] = j;
-        intShuffle(indexes);
+        // This method will iterate until it obtains a clustering that is < maxClusters
+        // Actually requiring more than one try should be rare
+        if (nclusters < 2) return;
         int sz = cent.length;
         double[] oldCent = cent;
         double[] oldMass = mass;
         cent = new double[sz];
         mass = new double[sz];
-        reset();
-        for (int j: indexes) updateLogic(oldCent[j], oldMass[j]);
+        Integer[] indexes = weightedOrdering(nclusters, oldCent, oldMass);
+        int iter = 0;
+        int nc = nclusters;
+        while (true) {
+            // reset cluster state to empty
+            reset();
+            C *= 1.1;
+            int split = (int)(0.5 * (double)(nc));
+            // we stop short of adding maxClusters, and this prevents recluster from
+            // being called recursively during the following updates, which
+            // guarantees this will halt
+            for (int j = 0; (j <= split) && (nclusters < maxClusters); ++j) {
+                // start by inserting larger or more central clusters first: "middle out"
+                update(oldCent[indexes[j]], oldMass[indexes[j]]);
+            }
+            for (int j = nc-1; (j > split) && (nclusters < maxClusters); --j) {
+                // finish by inserting clusters out on the tails outward-in:
+                // preserves the tail resolution and avoids the pathological
+                // scenario where points keep getting added to the end
+                update(oldCent[indexes[j]], oldMass[indexes[j]]);
+            }
+            // if the new clustering size is < maxClusters we declare victory
+            iter += 1;
+            if (nclusters < maxClusters) break;
+            // otherwise we increase the compression and try again
+                //System.out.format("C= %f\n", C);
+        }
+        if (iter > 1) System.out.format("iter= %d  nclusters=%d\n\n", iter, nclusters);
     }
 
     /** Reset this t-digest to an empty state */
@@ -276,7 +317,40 @@ public class TDigest implements Serializable {
         M = 0.0;
     }
 
+    private final Integer[] weightedOrdering(final int n, double[] icent, double[] imass) {
+        assert n >= 0;
+        assert n <= imass.length;
+        assert imass.length == icent.length;
+        Integer[] indexes = new Integer[n];
+        double z = 0.0;
+        for (int j = 0; j < n; ++j) {
+            z += imass[j];
+            indexes[j] = j;
+        }
+        // if there is no sorting needed, quit here
+        if (n < 2) return indexes;
+        double[] weight = new double[n];
+        double macc = 0.0;
+        for (int j = 0; j < n; ++j) {
+            double m = imass[j];
+            double q = (macc + (m / 2.0)) / z;
+            weight[j] = m * q * (1.0 - q);
+            macc += m;
+        }
+        Comparator<Integer> cmp = new Comparator<Integer>() {
+            @Override
+            public int compare(Integer a, Integer b) {
+                return (int)Math.signum(weight[b] - weight[a]);
+            }
+        };
+        Arrays.sort(indexes, cmp);
+        return indexes;
+    }
+
     private final void newCluster(int j, double x, double w) {
+        // this method will allocate new memory if necessary but assumes that
+        // it is not up against the max-cluster bound
+        assert nclusters < maxClusters;
         double[] newCent = cent;
         double[] newMass = mass;
         double[] newFtre = ftre;
@@ -284,6 +358,7 @@ public class TDigest implements Serializable {
         if (nclusters >= sz) {
             int szinc = (int)Math.ceil(0.1 * (double)sz);
             sz += szinc;
+            sz = Math.min(sz, maxClusters);
             newCent = new double[sz];
             newMass = new double[sz];
             newFtre = new double[1 + sz];
@@ -335,11 +410,18 @@ public class TDigest implements Serializable {
         return M;
     }
 
-    /** Obtain the compression setting for this t-digest
-     * @return the compression setting
+    /** Obtain the compression factor for this t-digest
+     * @return the current compression factor
      */
-    public final double getCompression() {
+    public final double compression() {
         return C;
+    }
+
+    /** Obtain the maxsize setting for this t-digest
+     * @return the maxsize setting
+     */
+    public final int getMaxSize() {
+        return maxClusters;
     }
 
     /** Obtain the maximum discrete setting for this t-digest
@@ -669,65 +751,46 @@ public class TDigest implements Serializable {
         return (int)(v ^ (v >>> 32));
     }
 
-    protected final int R() {
-        return (int)(K / C);
-    }
-
-    /**
-     * The t-digest algorithm will re-cluster itself whenever its number of clusters exceeds
-     * (K/delta).  This value is set such that the threshold is about 10x the heuristically
-     * expected number of clusters for the user-specified delta value.  Generally the number of
-     * clusters will only trigger the corresponding re-clustering threshold when data are being
-     * presented in a non-random order.
-     */
-    public static final double K = 10.0 * 50.0;
-
-    /**
-     * Default value for a t-digest compression (aka delta) parameter.
-     * The number of clusters varies, roughly, as
-     * about (50/delta), when data are presented in random order
-     * (it may grow larger if data are not presented randomly).  The default corresponds to
-     * an expected number of clusters of about 100.
-     */
-    public static final double COMPRESSION_DEFAULT = 50.0 / 100.0;
+    /** Default for the maximum number of clusters */
+    public static final int MAX_SIZE_DEFAULT = 100;
 
     /** Default for the initial cluster array capacity */
     public static final int INIT_SIZE_DEFAULT = 5;
 
-    /** Obtain an empty t-digest with default compression and maximum discrete tracking. 
+    /** Obtain an empty t-digest with default maxsize and maximum discrete tracking. 
      * @return a new empty t-digest
      */
     public static TDigest empty() {
-        return new TDigest(COMPRESSION_DEFAULT, 0, INIT_SIZE_DEFAULT);
+        return new TDigest(MAX_SIZE_DEFAULT, 0, INIT_SIZE_DEFAULT);
     }
 
     /**
      * Obtain an empty t-digest.
      * maxDiscrete defaults to zero.
-     * @param compression sketching compression setting. Higher = more compression.
+     * @param maxSize sketching maxsize setting.
      * Must be &gt; 0.
      * @return a new empty t-digest
      */
-    public static TDigest empty(double compression) {
-        return new TDigest(compression, 0, INIT_SIZE_DEFAULT);
+    public static TDigest empty(int maxSize) {
+        return new TDigest(maxSize, 0, INIT_SIZE_DEFAULT);
     }
 
     /**
      * Obtain an empty t-digest.
-     * @param compression sketching compression setting. Higher = more compression.
+     * @param maxSize sketching maxsize setting.
      * Must be &gt; 0.
      * @param maxDiscrete maximum number of unique discrete values to track. Must be &ge; 0.
      * If this number of values is exceeded, the sketch will begin to operate in 
      * normal continuous mode.
      * @return a new empty t-digest
      */
-    public static TDigest empty(double compression, int maxDiscrete) {
-        return new TDigest(compression, maxDiscrete, INIT_SIZE_DEFAULT);
+    public static TDigest empty(int maxSize, int maxDiscrete) {
+        return new TDigest(maxSize, maxDiscrete, INIT_SIZE_DEFAULT);
     }
 
     /**
      * Obtain an empty t-digest.
-     * @param compression sketching compression setting. Higher = more compression.
+     * @param maxSize sketching maxsize setting.
      * Must be &gt; 0.
      * @param maxDiscrete maximum number of unique discrete values to track. Must be &ge; 0.
      * If this number of values is exceeded, the sketch will begin to operate in 
@@ -735,8 +798,8 @@ public class TDigest implements Serializable {
      * @param sz initial capacity to use for internal arrays. Must be &gt; 0.
      * @return a new empty t-digest
      */
-    public static TDigest empty(double compression, int maxDiscrete, int sz) {
-        return new TDigest(compression, maxDiscrete, sz);
+    public static TDigest empty(int maxSize, int maxDiscrete, int sz) {
+        return new TDigest(maxSize, maxDiscrete, sz);
     }
 
     /** Merge the argument with smaller mass into the one with larger mass, and return
@@ -764,44 +827,44 @@ public class TDigest implements Serializable {
     }
 
     /**
-     * Sketch data using a t-digest with default compression and maximum discrete tracking.
+     * Sketch data using a t-digest with default maxsize and maximum discrete tracking.
      * @param data the data to sketch
      * @return a t-digest sketch of the data
      */
     public static TDigest sketch(double[] data) {
-        return sketch(data, COMPRESSION_DEFAULT, 0, INIT_SIZE_DEFAULT);
+        return sketch(data, MAX_SIZE_DEFAULT, 0, INIT_SIZE_DEFAULT);
     }
 
     /**
      * Sketch data using a t-digest.
      * maxDiscrete defaults to zero.
      * @param data the data to sketch
-     * @param compression sketching compression setting. Higher = more compression.
+     * @param maxSize sketching maxSize setting.
      * Must be &gt; 0.
      * @return a t-digest sketch of the data
      */
-    public static TDigest sketch(double[] data, double compression) {
-        return sketch(data, compression, 0, INIT_SIZE_DEFAULT);
+    public static TDigest sketch(double[] data, int maxSize) {
+        return sketch(data, maxSize, 0, INIT_SIZE_DEFAULT);
     }
 
     /**
      * Sketch data using a t-digest.
      * @param data the data to sketch
-     * @param compression sketching compression setting. Higher = more compression.
+     * @param maxSize sketching maxsize setting.
      * Must be &gt; 0.
      * @param maxDiscrete maximum number of unique discrete values to track. Must be &ge; 0.
      * If this number of values is exceeded, the sketch will begin to operate in 
      * normal continuous mode.
      * @return a t-digest sketch of the data
      */
-    public static TDigest sketch(double[] data, double compression, int maxDiscrete) {
-        return sketch(data, compression, maxDiscrete, INIT_SIZE_DEFAULT);
+    public static TDigest sketch(double[] data, int maxSize, int maxDiscrete) {
+        return sketch(data, maxSize, maxDiscrete, INIT_SIZE_DEFAULT);
     }
 
     /**
      * Sketch data using a t-digest.
      * @param data the data to sketch
-     * @param compression sketching compression setting. Higher = more compression.
+     * @param maxSize sketching maxsize setting.
      * Must be &gt; 0.
      * @param maxDiscrete maximum number of unique discrete values to track. Must be &ge; 0.
      * If this number of values is exceeded, the sketch will begin to operate in 
@@ -809,30 +872,9 @@ public class TDigest implements Serializable {
      * @param sz initial capacity to use for internal arrays. Must be &gt; 0.
      * @return a t-digest sketch of the data
      */
-    public static TDigest sketch(double[] data, double compression, int maxDiscrete, int sz) {
-        TDigest td = empty(compression, maxDiscrete, sz);
+    public static TDigest sketch(double[] data, int maxSize, int maxDiscrete, int sz) {
+        TDigest td = empty(maxSize, maxDiscrete, sz);
         for (double x: data) td.update(x, 1.0);
-        if (td.size() > maxDiscrete) td.recluster();
         return td;
-    }
-
-    static void intShuffle(int[] data) {
-        intShuffle(data, 0, data.length);
-    }
-
-    static void intShuffle(int[] data, int end) {
-        intShuffle(data, 0, end);
-    }
-
-    static void intShuffle(int[] data, int beg, int end) {
-        ThreadLocalRandom rnd = ThreadLocalRandom.current();
-        end -= 1;
-        while (end > beg) {
-            int r = rnd.nextInt(beg, end);
-            int d = data[end];
-            data[end] = data[r];
-            data[r] = d;
-            end -= 1;
-        }
     }
 }

@@ -1,5 +1,5 @@
 /*
-Copyright 2016-2018 Erik Erlandson
+Copyright 2016-2020 Erik Erlandson
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -28,10 +28,11 @@ class JavaTDigestTest extends FlatSpec with Matchers {
   scala.util.Random.setSeed(seed)
 
   val ss = 100000
-  val delta = 50.0 / 1000
+
+  val maxsize = 100
 
   val maxD = 0.05
-  val maxDI = 0.1
+  val maxDI = 0.10
 
   def testTDvsDist(td: TDigest, dist: RealDistribution, stdv: Double): Boolean = {
     val xmin = td.cent(0)
@@ -72,14 +73,14 @@ class JavaTDigestTest extends FlatSpec with Matchers {
   def testDistribution(dist: RealDistribution, stdv: Double): Boolean = {
     dist.reseedRandomGenerator(seed)
 
-    val td = TDigest.sketch(Array.fill(ss) { dist.sample }, delta)
+    val td = TDigest.sketch(Array.fill(ss) { dist.sample }, maxsize)
 
     testTDvsDist(td, dist, stdv) && testSamplingPDF(td, dist)
   }
 
   def testMonotoneCDF(dist: RealDistribution): Boolean = {
     dist.reseedRandomGenerator(seed)
-    val td = TDigest.sketch(Array.fill(ss) { dist.sample }, delta)
+    val td = TDigest.sketch(Array.fill(ss) { dist.sample }, maxsize)
     val (xmin, xmax) = (td.cent(0), td.cent(td.nclusters - 1))
     val step = (xmax - xmin) / 100000
     val t = (xmin to xmax by step).iterator.map(x => td.cdf(x)).sliding(2).map(w => w(1) - w(0)).min
@@ -90,7 +91,7 @@ class JavaTDigestTest extends FlatSpec with Matchers {
 
   def testMonotoneCDFI(dist: RealDistribution): Boolean = {
     dist.reseedRandomGenerator(seed)
-    val td = TDigest.sketch(Array.fill(ss) { dist.sample }, delta)
+    val td = TDigest.sketch(Array.fill(ss) { dist.sample }, maxsize)
     val (xmin, xmax) = (0.0, 1.0)
     val step = (xmax - xmin) / 100000
     val t = (xmin to xmax by step).iterator.map(q => td.cdfInverse(q)).sliding(2).map(w => w(1) - w(0)).min
@@ -126,8 +127,8 @@ class JavaTDigestTest extends FlatSpec with Matchers {
     val dist = new NormalDistribution()
     dist.reseedRandomGenerator(seed)
 
-    val td1 = TDigest.sketch(Array.fill(ss) { dist.sample }, delta)
-    val td2 = TDigest.sketch(Array.fill(ss) { dist.sample }, delta)
+    val td1 = TDigest.sketch(Array.fill(ss) { dist.sample }, maxsize)
+    val td2 = TDigest.sketch(Array.fill(ss) { dist.sample }, maxsize)
 
     testTDvsDist(TDigest.merge(td1, td2), dist, math.sqrt(dist.getNumericalVariance())) should be (true)
   }
@@ -148,7 +149,7 @@ class JavaTDigestTest extends FlatSpec with Matchers {
     val data = gd.sample(1000000).map(_.toDouble)
     val dataUniq = data.distinct.sorted
     val kt = dataUniq.map(_.toDouble).toSet
-    val td = TDigest.sketch(data, delta, 50)
+    val td = TDigest.sketch(data, maxsize, 50)
     val clust = td.cent
     clust.toSet should be (kt)
     val D = clust.map { x => td.cdfDiscrete(x) }
@@ -162,7 +163,7 @@ class JavaTDigestTest extends FlatSpec with Matchers {
   it should "respect maxDiscrete parameter over merge" in {
     import org.apache.commons.math3.distribution.GeometricDistribution
     val gd = new GeometricDistribution(0.33)
-    val tdvec = Vector.fill(10) { TDigest.sketch(gd.sample(100000).map(_.toDouble), delta, 50) }
+    val tdvec = Vector.fill(10) { TDigest.sketch(gd.sample(100000).map(_.toDouble), maxsize, 50) }
     val td = tdvec.reduce((a, b) => TDigest.merge(a, b))
     val clust = td.cent
     clust.map(_.toInt).map(_.toDouble).toVector should beEqSeq(clust.toVector)
@@ -180,7 +181,7 @@ class JavaTDigestTest extends FlatSpec with Matchers {
     val dist = new NormalDistribution()
     dist.reseedRandomGenerator(seed)
     val data = Array.fill(ss) { dist.sample }
-    val td1 = TDigest.sketch(data, delta)
+    val td1 = TDigest.sketch(data, maxsize)
     val td2 = new TDigest(td1)
     (td2.equals(td1)) should be (true)
     (td1.equals(td2)) should be (true)
@@ -196,10 +197,11 @@ class JavaTDigestTest extends FlatSpec with Matchers {
   }
 
   def testTDClose(td1: TDigest, td2: TDigest, eps: Double = 1e-6): Unit = {
-    td1.getCompression() should be (td2.getCompression())
+    td1.getMaxSize() should be (td2.getMaxSize())
     td1.getMaxDiscrete() should be (td2.getMaxDiscrete())
     td1.size() should be (td2.size())
     td1.mass() should be (td2.mass() +- eps)
+    td1.compression() should be (td2.compression() +- eps)
     for { j <- 0 until td1.size() } {
       td1.getCentUnsafe()(j) should be (td2.getCentUnsafe()(j) +- eps)
       td1.getMassUnsafe()(j) should be (td2.getMassUnsafe()(j) +- eps)
@@ -218,10 +220,11 @@ class JavaTDigestTest extends FlatSpec with Matchers {
     val data = Array.fill(ss) { dist.sample }
 
     // test constructing empty t-digests
-    val td1 = new TDigest(0.5, 0, Array.empty[Double], Array.empty[Double])
+    val td1 = new TDigest(50, 0, 0.1, Array.empty[Double], Array.empty[Double])
     val td2 = new TDigest(
-      td1.getCompression(),
+      td1.getMaxSize(),
       td1.getMaxDiscrete(),
+      td1.compression(),
       Arrays.copyOf(td1.getCentUnsafe(), td1.size()),
       Arrays.copyOf(td1.getMassUnsafe(), td1.size())
     )
@@ -236,8 +239,9 @@ class JavaTDigestTest extends FlatSpec with Matchers {
 
     // copy from non-empty state
     val td3 = new TDigest(
-      td1.getCompression(),
+      td1.getMaxSize(),
       td1.getMaxDiscrete(),
+      td1.compression(),
       Arrays.copyOf(td1.getCentUnsafe(), td1.size()),
       Arrays.copyOf(td1.getMassUnsafe(), td1.size())
     )
@@ -259,7 +263,7 @@ class JavaTDigestTest extends FlatSpec with Matchers {
     val dist = new NormalDistribution()
     dist.reseedRandomGenerator(seed)
 
-    val tdo = TDigest.sketch(Array.fill(ss) { dist.sample }, delta)
+    val tdo = TDigest.sketch(Array.fill(ss) { dist.sample }, maxsize)
 
     val tdi = roundTripSerDe(tdo)
 
