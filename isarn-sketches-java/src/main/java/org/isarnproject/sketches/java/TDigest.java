@@ -23,6 +23,8 @@ import java.util.Comparator;
 import java.io.Serializable;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.Random;
+import java.io.FileWriter;
+import java.io.PrintWriter;
 
 /**
  * A t-digest sketch of sampled numeric data
@@ -49,7 +51,7 @@ public class TDigest implements Serializable {
     protected final int maxDiscrete;
 
     /** compression (delta in original paper) */
-    protected double C;
+    protected double C = 1.0;
     /** current number of clusters */
     protected int nclusters = 0;
     /** total mass of data sampled so far */
@@ -60,6 +62,18 @@ public class TDigest implements Serializable {
     protected double[] mass = null;
     /** cumulative cluster masses, represented as a Fenwick Tree */
     protected double[] ftre = null;
+
+    int nnc = 0;
+    int nrc = 0;
+
+    public void dump() {
+            /*
+        PrintWriter f =  new PrintWriter(new FileWriter("/tmp/stats.txt", true));        
+        f.printf("nnc= %d  nrc= %d\n", nnc, nrc);
+        f.close();
+            */
+        System.out.format("nnc= %d  nrc= %d  C= %f  nc= %d\n", nnc, nrc, C, nclusters);
+    }
 
     /** A new t-digest sketching structure with default max-size and maximum discrete tracking. */
     public TDigest() {
@@ -103,7 +117,7 @@ public class TDigest implements Serializable {
         this.maxDiscrete = maxDisc;
         // compression such that middle half of (c)(q)(1-q) curve >= 2
         // that is: we can form "2-clusters" from the start, between quantile 0.25 - 0.75
-        C = 12.0 / (double)maxSize;
+        C = Math.min(3.0, 50.0 / (double)maxSize);
         sz = Math.min(sz, maxSize);
         cent = new double[sz];
         mass = new double[sz];
@@ -186,16 +200,7 @@ public class TDigest implements Serializable {
      * @param w the weight (aka mass) associated with x
      */
     public final void update(final double x, final double w) {
-        if (nclusters == 0) {
-            // clusters are empty, so (x,w) becomes the first cluster
-            cent[0] = x;
-            M = w;
-            mass[0] = w;
-            ftre[1] = w;
-            nclusters += 1;
-            return;
-        }
-        if (nclusters <= maxDiscrete) {
+        if (nclusters <= Math.max((int)(maxClusters * 0.67), maxDiscrete)) {
             // we are under the limit for discrete values to track
             int j = Arrays.binarySearch(cent, 0, nclusters, x);
             if (j >= 0) {
@@ -250,7 +255,11 @@ public class TDigest implements Serializable {
             ftInc(j, dm);
         }
         // if there is remaining mass, it becomes a new cluster
-        if (rm > 0.0) newCluster((x < cent[j]) ? j : j + 1, x, rm);
+        if (rm > 0.0) {
+            newCluster((x < cent[j]) ? j : j + 1, x, rm);
+                //C *= 1.01;
+        }
+        C *= 0.99999;
     }
 
     /** Merge another t-digest into this one.
@@ -275,6 +284,7 @@ public class TDigest implements Serializable {
     public final void recluster() {
         // This method will iterate until it obtains a clustering that is < maxClusters
         // Actually requiring more than one try should be rare
+        nrc += 1;
         if (nclusters < 2) return;
         int sz = cent.length;
         double[] oldCent = cent;
@@ -287,8 +297,8 @@ public class TDigest implements Serializable {
         while (true) {
             // reset cluster state to empty
             reset();
-            C *= 1.1;
-            int split = (int)(0.5 * (double)(nc));
+             C *= 1.1;
+             int split = (int)(0.5 * (double)(nc));
             // we stop short of adding maxClusters, and this prevents recluster from
             // being called recursively during the following updates, which
             // guarantees this will halt
@@ -308,7 +318,7 @@ public class TDigest implements Serializable {
             // otherwise we increase the compression and try again
                 //System.out.format("C= %f\n", C);
         }
-        if (iter > 1) System.out.format("iter= %d  nclusters=%d\n\n", iter, nclusters);
+            //if (iter > 1) System.err.format("iter= %d  nclusters=%d\n\n", iter, nclusters);
     }
 
     /** Reset this t-digest to an empty state */
@@ -348,6 +358,7 @@ public class TDigest implements Serializable {
     }
 
     private final void newCluster(int j, double x, double w) {
+        nnc += 1;
         // this method will allocate new memory if necessary but assumes that
         // it is not up against the max-cluster bound
         assert nclusters < maxClusters;
