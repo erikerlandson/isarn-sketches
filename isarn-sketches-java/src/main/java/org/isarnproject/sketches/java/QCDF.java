@@ -27,8 +27,8 @@ import java.util.Random;
 public class QCDF implements Serializable {
     protected int K = 0;
     protected double M = 0;
-    protected double cmin = Double.NaN;
-    protected double cmax = Double.NaN;
+    protected double cmin = Double.POSITIVE_INFINITY;
+    protected double cmax = Double.NEGATIVE_INFINITY;
     protected double[] cent = null;
     protected double[] mass = null;
     protected boolean discrete = true;
@@ -42,8 +42,8 @@ public class QCDF implements Serializable {
         }
         K = 0;
         M = 0.0;
-        cmin = Double.NaN;
-        cmax = Double.NaN;
+        cmin = Double.POSITIVE_INFINITY;
+        cmax = Double.NEGATIVE_INFINITY;
         cent = new double[k];
         mass = new double[k];
         discrete = true;
@@ -51,6 +51,10 @@ public class QCDF implements Serializable {
     }
 
     public void merge(QCDF that) {
+        // Merging min/max first so invariants are respected during
+        // subsequent merging logic
+        cmin = Math.min(cmin, that.cmin);
+        cmax = Math.max(cmax, that.cmax);
         Integer[] indexes = new Integer[that.K];
         for (int j = 0; j < that.K; ++j) indexes[j] = j;
         // sort so that largest clusters are first.
@@ -65,8 +69,12 @@ public class QCDF implements Serializable {
         for (int j: indexes) update(that.cent[j], that.mass[j]);        
     }
 
-    public final void update(double x) {
+    public final void update(final double x) {
         update(x, 1.0);
+    }
+
+    public final void update(final double[] data) {
+        for (double x: data) update(x, 1.0);
     }
 
     public void update(final double x, final double w) {
@@ -75,13 +83,10 @@ public class QCDF implements Serializable {
         }
         // adding new data invalidates any precomputed cumulative mass table
         cmss = null;
+        cmin = Math.min(cmin, x);
+        cmax = Math.max(cmax, x);
         if (K < cent.length) {
-            // we still haven't filled all the table entries
-            if (K == 0) cmin = cmax = x;
-            else {
-                cmin = Math.min(cmin, x);
-                cmax = Math.max(cmax, x);
-            }
+            // cluster elements are not fully populated yet 
             // identify an insertion point
             final int j = Arrays.binarySearch(cent, 0, K, x);
             if (j >= 0) {
@@ -106,125 +111,46 @@ public class QCDF implements Serializable {
         // we're now entering a non-discrete cluster update
         // so flag that this sketch is no longer reliably tracking discrete values
         discrete = false;
-        // check for x landing outside the current cluster boundaries
-        if (((j == K-1) && (x > cent[j])) ||
-            ((j == 0)   && (x < cent[j]))) {
-            // x landed somewhere outside of the cluster boundaries
-            if (x > cmax) {
-                double xt = cmax;
-                cmax = x;
-                M += 1.0;
-                if (w > 1.0) {
-                    double r = Math.max(0.5, (w - 1.0)/w);
-                    update(cent[j] + r*(x-cent[j]), w-1.0);
-                }
-                update(xt, 1.0);
-            } else if (x < cmin) {
-                double xt = cmin;
-                cmin = x;
-                M += 1.0;
-                if (w > 1.0) {
-                    double r = Math.max(0.5, (w - 1.0)/w);
-                    update(cent[j] - r*(cent[j]-x), w-1.0);
-                }
-                update(xt, 1.0);
-            } else if ((mass[j] < M / (double)K) || (w < 1.0)) {
-                // I need a catch for w<1, and this is reasonable as long as
-                // w<1 is uncommon. The only way currently I see that assumption to
-                // break is if a user deliberately inserts many points with weight < 1,
-                // and also in substantially monotonic order. If that happens I claim the
-                // tool isn't being used properly, but worth noting here.
-                cluster1(x, w, j);
-                M += w;
-            } else {
-                // Insert a new cluster. So first compact the largest cluster to make room
-                compact(j == (K-1));
-                cent[j] = x;
-                mass[j] = w;
-                M += w;
-            }
-        } else {
-            // x landed in the interior
-            // in a situation where distribution of incoming points is primarily stationary,
-            // this is by far the most common execution path
-            if (w > 1.0) {
-                // cluster-mode update - allocate cluster's mass to neighbors
-                if (x > cent[j]) cluster2(x, w, j, j + 1);
-                else             cluster2(x, w, j - 1, j);
-                M += w;
-            } else {
-                // if w is not > 1, w <= 1
-                // point-mode update - allocate to nearest cluster
-                cluster1(x, w, j);
-                M += w;
-            }
-        }
-    }
-
-    protected void cluster1(final double x, final double w, final int j) {
+        // update nearest cluster with (x,w)
+        M += w;
         mass[j] += w;
-        cent[j] += (x - cent[j]) / mass[j];        
+        cent[j] += (x - cent[j]) / mass[j];
+        // adapt to indications of non-stationary movement of the data distribution
+        nscheck(x, j);
     }
 
-    protected void cluster2(final double x, final double w, final int j1, final int j2) {
-        // assumes j1 < j2, and both are valid indexes into cent & mass arrays
-        // the intended use is inserting clusters: where w > 1
-        // the mass allocation ratio is derived assuming individual points (w=1)
-        // are allocated to nearest cluster.
-        double c1 = cent[j1];
-        double c2 = cent[j2];
-        double r2 = (x - c1) / (c2 - c1);
-        double w2 = w * r2;
-        double w1 = w - w2;
-        double m1 = mass[j1];
-        double m2 = mass[j2];
-        cent[j1] = (m1*c1 + w1*x)/(m1+w1);
-        mass[j1] += w1;
-        cent[j2] = (m2*c2 + w2*x)/(m2+w2);
-        mass[j2] += w2;
-    }
-
-    protected void compact(final boolean left) {
-        compact(largest(), left);
-    }
-
-    protected void compact(final int jc, final boolean left) {
-        if (jc == 0) {
-            // merge leftmost into it's neighbor to the right
-            cluster1(cent[jc], mass[jc], jc + 1);
-        } else if (jc == K-1) {
-            // merge rightmost into it's neighbor to the left
-            cluster1(cent[jc], mass[jc], jc - 1);
-        } else {
-            // merge interior to both its neighbors
-            cluster2(cent[jc], mass[jc], jc - 1, jc + 2);
-        }
-        if (left) {
-            // compact to the left (free up rightmost slot)
-            for (int j = jc + 1; j < K; ++j) {
-                cent[j-1] = cent[j];
-                mass[j-1] = mass[j];
+    protected void nscheck(final double x, final int j) {
+        if ((j == 0) && (x < cent[j]) && (mass[j] > (M / (double)K))) {
+            // heuristic indicates likely non-stationary movement to left
+            for (int k = K-2; k >= 0; --k) {
+                // shift half of cluster masses to right (moving right to left)
+                double hm = mass[k] / 2.0;
+                double hx = (3.0 * cent[k] + cent[k+1]) / 4.0;
+                mass[k+1] += hm;
+                cent[k+1] += (hx - cent[k+1]) / mass[k+1];
+                mass[k] = hm;
+                if (k > 0) {
+                    cent[k] = (3.0 * cent[k] + cent[k-1]) / 4.0;
+                } else {
+                    cent[k] = (cent[k] + cmin) / 2.0;
+                }
             }
-        } else {
-            // compact to the right
-            for (int j = jc; j > 0; --j) {
-                cent[j] = cent[j-1];
-                mass[j] = mass[j-1];
+        } else if ((j == K-1) && (x > cent[j]) && (mass[j] > (M / (double)K))) {
+            // non-stationary movement to right
+            for (int k = 1; k < K; ++k) {
+                // shift half of cluster masses to left (moving left to right)
+                double hm = mass[k] / 2.0;
+                double hx = (3.0 * cent[k] + cent[k-1]) / 4.0;
+                mass[k-1] += hm;
+                cent[k-1] += (hx - cent[k-1]) / mass[k-1];
+                mass[k] = hm;
+                if (k < K-1) {
+                    cent[k] = (3.0 * cent[k] + cent[k+1]) / 4.0;
+                } else {
+                    cent[k] = (cent[k] + cmax) / 2.0;
+                }
             }
         }
-    }
-
-    protected int largest() {
-        // identify largest cluster
-        int jmax = 0;
-        double mmax = mass[0];
-        for (int j = 1;  j < K;  ++j) {
-            if (mass[j] > mmax) {
-                jmax = j;
-                mmax = mass[j];
-            }
-        }
-        return jmax;
     }
 
     protected void insert(final int j, final double x, final double w) {
@@ -265,5 +191,88 @@ public class QCDF implements Serializable {
         double dL = x - cent[j - 1];
         double dR = cent[j] - x;
         return (dL < dR) ? (j - 1) : j;
+    }
+
+    public double cdfCont(final double x) {
+        if (K == 0) return Double.NaN;
+        // the following also gives best-effort for K = 1
+        if (x < cmin) return 0.0;
+        if (x >= cmax) return 1.0;
+        // if we get here K >= 2
+        // why? because cmin <= x < cmax => cmin < cmax
+        fillcmss();
+        // cent[j] <= x < cent[j+1]
+        final int j = rcovj(x);
+        double c1 = (j >= 0) ? cent[j] : cmin;
+        double c2 = (j < K-1) ? cent[j+1] : cmax;
+        double m0 = ((j > 0) ? cmss[j-1] : 0.0) + ((j >= 0) ? mass[j] / 2.0 : 0.0);
+        double m1 = (j >= 0) ? mass[j] / 2.0 : 0.0;
+        double m2 = (j < K-1) ? mass[j+1] / 2.0 : 0.0;
+        if (j == 0 && cmin == cent[0]) {
+            m0 = 0.0;
+            m1 = mass[0];
+        }
+        if (j == K-2 && cmax == cent[K-1]) {
+            m2 = mass[K-1];
+        }
+        return (m0 + ((m1 + m2) * (x - c1) / (c2 - c1))) / M;
+    }
+
+    protected void fillcmss() {
+        // requires cmss to be nulled out whenever the underlying
+        // clusters change due to updating with new data
+        if (cmss != null) return;
+        cmss = new double[K];
+        double s = 0;
+        for (int j = 0; j < K; ++j) {
+            s += mass[j];
+            cmss[j] = s;
+        }
+    }
+
+    // returns the left index of a right-cover
+    // cent[j] <= x < cent[j+1]
+    protected int rcovj(final double x) {
+        int j = Arrays.binarySearch(cent, 0, K, x);
+        // exact match, return its index:
+        if (j >= 0) return j;
+        // x is not a cluster center, get its insertion index:
+        j = -(j + 1);
+        // return the index to the left of x:
+        return j - 1;
+    }
+
+    public int rcovjtest(final double x, double[] data) {
+        int j = Arrays.binarySearch(data, 0, data.length, x);
+        // exact match, return its index:
+        if (j >= 0) return j;
+        // x is not a cluster center, get its insertion index:
+        j = -(j + 1);
+        // return the index to the left of x:
+        return j - 1;
+    }
+
+    @Override
+    public String toString() {
+        StringBuilder sb = new StringBuilder("QCDF(");
+        sb.append(K).append(", ");
+        sb.append(M).append(", ");
+        sb.append(cmin).append(", ");
+        sb.append(cmax).append(", ");
+        sb.append(discrete).append(", ");
+        sb.append("[");
+        for (int j = 0; j < K; ++j) {
+            if (j > 10) {
+                sb.append(" ...");
+                break;
+            }
+            if (j > 0) sb.append(", ");
+            sb.append(cent[j])
+                .append(":")
+                .append(mass[j]);
+        }
+        sb.append("]");
+        sb.append(")");
+        return sb.toString();        
     }
 }
