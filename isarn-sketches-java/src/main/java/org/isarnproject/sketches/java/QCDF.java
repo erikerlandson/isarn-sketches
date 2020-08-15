@@ -78,11 +78,10 @@ public class QCDF implements Serializable {
     }
 
     public void update(final double x, final double w) {
-        if (w <= 0.0) {
-            throw new IllegalArgumentException("weight must be > 0");
-        }
+        if (w <= 0.0) throw new IllegalArgumentException("weight must be > 0");
         // adding new data invalidates any precomputed cumulative mass table
         cmss = null;
+        // maintain global max and min values
         cmin = Math.min(cmin, x);
         cmax = Math.max(cmax, x);
         if (K < cent.length) {
@@ -97,60 +96,96 @@ public class QCDF implements Serializable {
                 // a new x value: insert as a new cluster
                 insert(-(j + 1), x, w);
             }
-            return;
+        } else {
+            // begin logic for an already-full table
+            // get the index of the cluster closest to x
+            final int j = closest(x);
+            if (x == cent[j]) {
+                // landed on existing cluster: add its mass and we're done
+                M += w;
+                mass[j] += w;
+            } else {
+                // we're now entering a non-discrete cluster update
+                // so flag that this sketch is no longer reliably tracking discrete values
+                discrete = false;
+                // update nearest cluster with (x,w)
+                M += w;
+                if (ddnewclust(x, w, j)) {
+                    // j is 0 or K-1 and we have made room for a new cluster, in response
+                    // to heuristically detecting possible data drift to left or right
+                    mass[j] = w;
+                    cent[j] = x;
+                } else {
+                    // otherwise we add to nearest cluster normally
+                    mass[j] += w;
+                    cent[j] += (x - cent[j]) / mass[j];
+                }
+            }
         }
-        // begin logic for an already-full table
-        // get the index of the cluster closest to x
-        final int j = closest(x);
-        if (x == cent[j]) {
-            // landed on existing cluster: add its mass and we're done
-            M += w;
-            mass[j] += w;
-            return;
-        }
-        // we're now entering a non-discrete cluster update
-        // so flag that this sketch is no longer reliably tracking discrete values
-        discrete = false;
-        // update nearest cluster with (x,w)
-        M += w;
-        mass[j] += w;
-        cent[j] += (x - cent[j]) / mass[j];
-        // adapt to indications of non-stationary movement of the data distribution
-        nscheck(x, j);
     }
 
-    protected void nscheck(final double x, final int j) {
-        if ((j == 0) && (x < cent[j]) && (mass[j] > (M / (double)K))) {
-            // heuristic indicates likely non-stationary movement to left
-            for (int k = K-2; k >= 0; --k) {
-                // shift half of cluster masses to right (moving right to left)
-                double hm = mass[k] / 2.0;
-                double hx = (3.0 * cent[k] + cent[k+1]) / 4.0;
-                mass[k+1] += hm;
-                cent[k+1] += (hx - cent[k+1]) / mass[k+1];
-                mass[k] = hm;
-                if (k > 0) {
-                    cent[k] = (3.0 * cent[k] + cent[k-1]) / 4.0;
-                } else {
-                    cent[k] = (cent[k] + cmin) / 2.0;
+    protected boolean ddnewclust(final double x, final double w, final int j) {
+        if (((j == 0) && (x < cent[j]) || (j == K-1) && (x > cent[j])) &&
+            ((w + mass[j]) > (M / (double)K))) {
+            // heuristic indicates likely non-stationary movement to left or right
+            // look at the smallest cluster
+            int jmrg = ncsmallest();
+            // if the smallest cluster is < M/(100*K) then merge that, otherwise
+            // identify a cluster with the closest neighbor (the smaller of the pair)
+            if (mass[jmrg] >= (M / (100.0 * K))) jmrg = closestsmaller();
+            // merge our choice to its closest neighbor
+            final int jnbr = ncclosest(jmrg);
+            mass[jnbr] += mass[jmrg];
+            cent[jnbr] += (cent[jmrg] - cent[jnbr]) / mass[jnbr];
+            // shift left or right to make room at the correct end for a new cluster
+            if (j == 0) {
+                for (int k = jmrg; k > 0; --k) {
+                    mass[k] = mass[k-1];
+                    cent[k] = cent[k-1];
+                }
+            } else {
+                for (int k = jmrg; k < K-1; ++k) {
+                    mass[k] = mass[k+1];
+                    cent[k] = cent[k+1];
                 }
             }
-        } else if ((j == K-1) && (x > cent[j]) && (mass[j] > (M / (double)K))) {
-            // non-stationary movement to right
-            for (int k = 1; k < K; ++k) {
-                // shift half of cluster masses to left (moving left to right)
-                double hm = mass[k] / 2.0;
-                double hx = (3.0 * cent[k] + cent[k-1]) / 4.0;
-                mass[k-1] += hm;
-                cent[k-1] += (hx - cent[k-1]) / mass[k-1];
-                mass[k] = hm;
-                if (k < K-1) {
-                    cent[k] = (3.0 * cent[k] + cent[k+1]) / 4.0;
-                } else {
-                    cent[k] = (cent[k] + cmax) / 2.0;
-                }
+            return true;
+        }
+        return false;
+    }
+
+    // find closest pair, and return index of the smaller one
+    protected int closestsmaller() {
+        int jmin = 0;
+        double dmin = Double.POSITIVE_INFINITY;
+        for (int j = 0; j < K-1; ++j) {
+            if (dmin > (cent[j+1] - cent[j])) {
+                dmin = cent[j+1] - cent[j];
+                jmin = (mass[j] < mass[j+1]) ? j : j+1;
             }
         }
+        return jmin;        
+    }
+
+    protected int ncsmallest() {
+        int jmin = 0;
+        double dmin = mass[0];
+        for (int j = 1; j < K; ++j) {
+            if (dmin > mass[j]) {
+                dmin = mass[j];
+                jmin = j;
+            }
+        }
+        return jmin;        
+    }
+
+    // given j, return index of cluster-j's closest neighbor
+    protected int ncclosest(final int j) {
+        if (j == 0) return j + 1;
+        if (j == K-1) return K-2;
+        double dL = cent[j] - cent[j-1];
+        double dR = cent[j+1] - cent[j];
+        return (dL < dR) ? (j-1) : (j+1);
     }
 
     protected void insert(final int j, final double x, final double w) {
@@ -234,16 +269,6 @@ public class QCDF implements Serializable {
     // cent[j] <= x < cent[j+1]
     protected int rcovj(final double x) {
         int j = Arrays.binarySearch(cent, 0, K, x);
-        // exact match, return its index:
-        if (j >= 0) return j;
-        // x is not a cluster center, get its insertion index:
-        j = -(j + 1);
-        // return the index to the left of x:
-        return j - 1;
-    }
-
-    public int rcovjtest(final double x, double[] data) {
-        int j = Arrays.binarySearch(data, 0, data.length, x);
         // exact match, return its index:
         if (j >= 0) return j;
         // x is not a cluster center, get its insertion index:
