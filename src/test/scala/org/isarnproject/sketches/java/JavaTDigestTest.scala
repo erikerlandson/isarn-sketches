@@ -20,6 +20,30 @@ import org.scalatest._
 
 import org.isarnproject.scalatest.matchers.seq._
 
+
+object Benchmark {
+    def apply[T](blk: => T): (Double, T) = {
+        val t0 = System.currentTimeMillis
+        val v = blk
+        val t = System.currentTimeMillis
+        ((t - t0).toDouble / 1000.0, v)
+    }
+
+    def sample[T](samples: Int, reps: Int = 1)(blk: => T): Array[(Double, T)] = {
+        Array.fill(samples) {
+          val t0 = System.currentTimeMillis
+          var r = 0
+          while (r < reps-1) {
+            val v = blk
+            r += 1
+          }
+          val v = blk
+          val t = System.currentTimeMillis
+          ((t - t0).toDouble / 1000.0, v)
+        }
+    }
+}
+
 class JavaTDigestTest extends FlatSpec with Matchers {
   import org.apache.commons.math3.distribution.RealDistribution
   import org.apache.commons.math3.distribution.IntegerDistribution

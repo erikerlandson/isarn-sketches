@@ -35,7 +35,10 @@ public class QCDF implements Serializable {
 
     // cumulative masses
     protected double[] cmss = null;
+    int reclusters = 0;
 
+    public int nrc() { return reclusters; }
+    
     public QCDF(final int k) {
         if (k < 2) {
             throw new IllegalArgumentException("number of clusters must be >= 2");
@@ -48,6 +51,7 @@ public class QCDF implements Serializable {
         mass = new double[k];
         discrete = true;
         cmss = null;
+        reclusters = 0;
     }
 
     public void merge(QCDF that) {
@@ -127,6 +131,7 @@ public class QCDF implements Serializable {
     protected boolean ddnewclust(final double x, final double w, final int j) {
         if (((j == 0) && (x < cent[j]) || (j == K-1) && (x > cent[j])) &&
             ((w + mass[j]) > (M / (double)K))) {
+            reclusters += 1;
             // heuristic indicates likely non-stationary movement to left or right
             // look at the smallest cluster
             int jmrg = ncsmallest();
@@ -212,7 +217,7 @@ public class QCDF implements Serializable {
         M += w;
     }
 
-    protected int closest(final double x) {
+    public int closest(final double x) {
         int j = Arrays.binarySearch(cent, 0, K, x);
         // exact match, return its index:
         if (j >= 0) return j;
