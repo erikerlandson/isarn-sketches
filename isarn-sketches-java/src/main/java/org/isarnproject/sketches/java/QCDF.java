@@ -217,6 +217,10 @@ public class QCDF implements Serializable {
         M += w;
     }
 
+    public final void executeBinarySearch(final double[] data) {
+        for (double x: data) Arrays.binarySearch(cent, 0, K, x);
+    }
+
     public int closest(final double x) {
         int j = Arrays.binarySearch(cent, 0, K, x);
         // exact match, return its index:
