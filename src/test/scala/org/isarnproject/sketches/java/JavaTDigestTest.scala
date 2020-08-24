@@ -42,6 +42,19 @@ object Benchmark {
           ((t - t0).toDouble / 1000.0, v)
         }
     }
+
+    import java.util.Arrays.binarySearch
+    def binarySearchBenchmark(keys: Array[Double], sorted: Array[Double]): Unit = {
+        val nk = keys.length
+        val ns = sorted.length
+        var j = 0
+        while (j < nk) {
+            binarySearch(sorted, 0, ns, keys(j))
+            j += 1
+        }
+    }
+
+    val sorted = Array(-2.37, -1.62, -1.10, -0.66, -0.28, 0.08, 0.45, 0.88, 1.42, 2.19)
 }
 
 class JavaTDigestTest extends FlatSpec with Matchers {
