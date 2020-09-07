@@ -32,14 +32,19 @@ public class QCDF implements Serializable {
     protected double[] cent = null;
     protected double[] mass = null;
     protected boolean discrete = true;
+    protected double B = 0;
 
     // cumulative masses
     protected double[] cmss = null;
     int reclusters = 0;
 
     public int nrc() { return reclusters; }
-    
+
     public QCDF(final int k) {
+        this(k, 1.0 / (100.0 * (double)k));
+    }
+
+    public QCDF(final int k, final double eps) {
         if (k < 2) {
             throw new IllegalArgumentException("number of clusters must be >= 2");
         }
@@ -50,27 +55,9 @@ public class QCDF implements Serializable {
         cent = new double[k];
         mass = new double[k];
         discrete = true;
+        B = Math.pow(eps, 1.0 / 3.0);
         cmss = null;
         reclusters = 0;
-    }
-
-    public void merge(QCDF that) {
-        // Merging min/max first so invariants are respected during
-        // subsequent merging logic
-        cmin = Math.min(cmin, that.cmin);
-        cmax = Math.max(cmax, that.cmax);
-        Integer[] indexes = new Integer[that.K];
-        for (int j = 0; j < that.K; ++j) indexes[j] = j;
-        // sort so that largest clusters are first.
-        // inserting large to small yields stable distribution estimations
-        Comparator<Integer> cmp = new Comparator<Integer>() {
-            @Override
-            public int compare(Integer a, Integer b) {
-                return (int)Math.signum(that.mass[b] - that.mass[a]);
-            }
-        };
-        Arrays.sort(indexes, cmp);
-        for (int j: indexes) update(that.cent[j], that.mass[j]);        
     }
 
     public final void update(final double x) {
@@ -114,59 +101,84 @@ public class QCDF implements Serializable {
                 discrete = false;
                 // update nearest cluster with (x,w)
                 M += w;
-                if (ddnewclust(x, w, j)) {
-                    // j is 0 or K-1 and we have made room for a new cluster, in response
-                    // to heuristically detecting possible data drift to left or right
-                    mass[j] = w;
-                    cent[j] = x;
-                } else {
-                    // otherwise we add to nearest cluster normally
+                final double maxM = M * massfactor(j);
+                if ((mass[j] + w) <= maxM) {
+                    // add to nearest cluster normally
                     mass[j] += w;
                     cent[j] += (x - cent[j]) / mass[j];
+                } else {
+                    // merge one cluster and make room at jth position
+                    vacate(j);
+                    // install (x,w) at position j
+                    mass[j] = w;
+                    cent[j] = x;
                 }
             }
         }
     }
 
-    protected boolean ddnewclust(final double x, final double w, final int j) {
-        if (((j == 0) && (x < cent[j]) || (j == K-1) && (x > cent[j])) &&
-            ((w + mass[j]) > (M / (double)K))) {
-            reclusters += 1;
-            // heuristic indicates likely non-stationary movement to left or right
-            // look at the smallest cluster
-            int jmrg = ncsmallest();
-            // if the smallest cluster is < M/(100*K) then merge that, otherwise
-            // identify a cluster with the closest neighbor (the smaller of the pair)
-            if (mass[jmrg] >= (M / (100.0 * K))) jmrg = closestsmaller();
-            // merge our choice to its closest neighbor
-            final int jnbr = ncclosest(jmrg);
-            mass[jnbr] += mass[jmrg];
-            cent[jnbr] += (cent[jmrg] - cent[jnbr]) / mass[jnbr];
-            // shift left or right to make room at the correct end for a new cluster
-            if (j == 0) {
-                for (int k = jmrg; k > 0; --k) {
-                    mass[k] = mass[k-1];
-                    cent[k] = cent[k-1];
-                }
-            } else {
-                for (int k = jmrg; k < K-1; ++k) {
-                    mass[k] = mass[k+1];
-                    cent[k] = cent[k+1];
-                }
-            }
-            return true;
+    public double massfactor(final int j) {
+        if ((j < 3) && (K >= 7)) {
+            return Math.pow(B, 3 - j);
         }
-        return false;
+        if ((j >= K-3) && (K >= 7)) {
+            return Math.pow(B, j - (K-4));
+        }
+        return 1.0;
     }
 
-    // find closest pair, and return index of the smaller one
-    protected int closestsmaller() {
-        int jmin = 0;
+    protected void vacate(final int j) {
+        reclusters += 1;
+        int jdst = -1;
+        // look for underweight clusters
+        int jmrg = ncunderweight();
+        final double uwt = (mass[jmrg] / M) / massfactor(jmrg);
+        if (uwt < 0.1) {
+            // if one is "too underweight" then merge it
+            jdst = ncclosest(jmrg);
+        } else {
+            // identify closest pair of clusters
+            final int jlft = closestpair();
+            jdst = (mass[jlft] > mass[jlft+1]) ? jlft+1 : jlft;
+            jmrg = (mass[jlft] > mass[jlft+1]) ? jlft : jlft+1;
+        }
+        // merge to chosen destination
+        mass[jdst] += mass[jmrg];
+        cent[jdst] += (cent[jmrg] - cent[jdst]) / mass[jdst];
+        // shift left or right to vacate the jth position
+        if (j <= jmrg) {
+            for (int k = jmrg; k > j; --k) {
+                mass[k] = mass[k-1];
+                cent[k] = cent[k-1];
+            }
+        } else {
+            for (int k = jmrg; k < j; ++k) {
+                mass[k] = mass[k+1];
+                cent[k] = cent[k+1];
+            }
+        }
+    }
+
+    protected int closestpair() {
+        int jmin = K / 2;
         double dmin = Double.POSITIVE_INFINITY;
         for (int j = 0; j < K-1; ++j) {
-            if (dmin > (cent[j+1] - cent[j])) {
+            if (((cent[j+1] - cent[j]) < dmin) && ((mass[j]+mass[j+1])/M <= Math.max(massfactor(j),massfactor(j+1)))) {
                 dmin = cent[j+1] - cent[j];
-                jmin = (mass[j] < mass[j+1]) ? j : j+1;
+                jmin = j;
+            }
+        }
+        return jmin;        
+    }
+
+    protected int ncunderweight() {
+        int jmin = 0;
+        double dmin = (mass[0] / M) / massfactor(0);
+        for (int j = 1; j < K; ++j) {
+            double t = (mass[j] / M) / massfactor(j);
+            if (dmin > t) {
+                dmin = t;
+                jmin = j;
             }
         }
         return jmin;        
@@ -235,6 +247,25 @@ public class QCDF implements Serializable {
         double dL = x - cent[j - 1];
         double dR = cent[j] - x;
         return (dL < dR) ? (j - 1) : j;
+    }
+
+    public void merge(QCDF that) {
+        // Merging min/max first so invariants are respected during
+        // subsequent merging logic
+        cmin = Math.min(cmin, that.cmin);
+        cmax = Math.max(cmax, that.cmax);
+        Integer[] indexes = new Integer[that.K];
+        for (int j = 0; j < that.K; ++j) indexes[j] = j;
+        // sort so that largest clusters are first.
+        // inserting large to small yields stable distribution estimations
+        Comparator<Integer> cmp = new Comparator<Integer>() {
+            @Override
+            public int compare(Integer a, Integer b) {
+                return (int)Math.signum(that.mass[b] - that.mass[a]);
+            }
+        };
+        Arrays.sort(indexes, cmp);
+        for (int j: indexes) update(that.cent[j], that.mass[j]);        
     }
 
     public double cdfCont(final double x) {
